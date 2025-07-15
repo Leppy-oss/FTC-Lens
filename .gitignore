@@ -1,5 +1,5 @@
 # Dataset output
-*/dataset*
+*dataset*/
 
 # CAD files
 *.obj
@@ -7,11 +7,8 @@
 *.gltf
 *.glb
 *.STEP
-glb/
-glb_old/
-glb_reduced/
-models/
-models_tbd/
+*glb*/
+*models*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

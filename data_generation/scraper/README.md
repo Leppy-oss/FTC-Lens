@@ -1,0 +1,1 @@
+Full credit for the part scraper goes to B-Ricey763, who created the original gobilda_parts_bot repository on Github. This project slightly modifies the original scraper to generate an appropriate GoBilda parts library for training FTC Lens.

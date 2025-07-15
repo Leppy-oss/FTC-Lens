@@ -6,10 +6,11 @@ import trimesh
 import pyrender
 import numpy as np
 from PIL import Image
+from math import pi, cos, sin
 
 MODEL_DIR = "models/"
 OUTPUT_DIR = "dataset_s1/"
-IMG_PATH = os.path.join(OUTPUT_DIR, "images")
+IMG_PATH = "test/" # os.path.join(OUTPUT_DIR, "images")
 METADATA_PATH = os.path.join(OUTPUT_DIR, "metadata.jsonl")
 IMG_SIZE = 512
 CAMERA_RADIUS = 0.05
@@ -26,6 +27,7 @@ def load_step_part(filepath):
     scale = 0.8 / np.max(mesh.extents)
     mesh.apply_scale(scale)
     return mesh
+
 
 def render_single_view(mesh, camera_pose, renderer):
     scene = pyrender.Scene(bg_color=[0.95, 0.95, 0.95, 1.0], ambient_light=[0.3, 0.3, 0.3, 1.0])
@@ -54,27 +56,49 @@ def render_single_view(mesh, camera_pose, renderer):
     return color
 
 
-def generate_orbit_camera_poses(num_views=8, radius=1.0, center=np.array([0.0, 0.0, 0.0])):
-    base_pose = np.array([
-        [0.0,  -np.sqrt(2)/2,  np.sqrt(2)/2, center[0] + radius],
-        [1.0,   0.0,            0.0,         center[1]],
-        [0.0,   np.sqrt(2)/2,   np.sqrt(2)/2, center[2] + radius],
-        [0.0,   0.0,            0.0,         1.0]
-    ])
+def generate_camera_positions(r=2, n_elev=8, n_azi=3):
+    positions = []
 
+    for i_a in range(n_azi):
+        az = i_a * 2 * pi / n_azi
+        for i_e in range(n_elev):
+            el = i_e * pi / n_elev - pi / 2
+            x = r * cos(el) * cos(az)
+            y = r * cos(el) * sin(az)
+            z = r * sin(el)
+            positions.append(np.array((x, y, z)))
+
+    return positions
+
+
+def generate_camera_poses(v_t_center=np.array([0, 0, 0]), offset_scale=0.3):
     poses = []
-    for i in range(num_views):
-        theta = 2 * np.pi * i / num_views
-        rot_z = np.array([
-            [np.cos(theta), -np.sin(theta), 0, 0],
-            [np.sin(theta),  np.cos(theta), 0, 0],
-            [0,              0,             1, 0],
-            [0,              0,             0, 1]
-        ])
-        cam_pose = rot_z @ base_pose
-        poses.append(cam_pose)
+    positions = generate_camera_positions()
+
+    for v_e in positions:
+        v_t = v_t_center + np.random.uniform(-offset_scale, offset_scale, 3)
+        forward = v_t - v_e
+        forward /= np.linalg.norm(forward)
+
+        up = np.array([0.0, 1.0, 0.0])
+        right = np.cross(forward, up)
+        right /= np.linalg.norm(right)
+
+        true_up = np.cross(right, forward)
+
+        rot = np.eye(4)
+        rot[:3, 0] = right
+        rot[:3, 1] = true_up
+        rot[:3, 2] = -forward  # openGL std
+
+        trans = np.eye(4)
+        trans[:3, 3] = v_e
+
+        pose = trans @ rot
+        poses.append(pose)
 
     return poses
+
 
 def main():
     start = timeit.default_timer()
@@ -89,17 +113,18 @@ def main():
             part_name = os.path.splitext(step_file)[0]
             print(f"Rendering {part_name}")
                 
-            camera_poses = generate_orbit_camera_poses()
+            camera_poses = generate_camera_poses()
 
             for i, pose in enumerate(camera_poses):
-                """
                 img = render_single_view(mesh, pose, r)
                 img_path = os.path.join(IMG_PATH, f"{part_name}_{i}.png")
                 Image.fromarray(img).save(img_path)
-                """
 
+                """
                 json_line = {"image": f"images/{part_name}_{i}.png", "label": part_name}
                 fj.write(json.dumps(json_line) + "\n")
+                """
+            break
     
     r.delete()
     stop = timeit.default_timer()
