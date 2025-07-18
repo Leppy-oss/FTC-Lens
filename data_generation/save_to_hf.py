@@ -9,4 +9,4 @@ args = parser.parse_args()
 
 dataset = load_dataset("imagefolder", data_dir=f"dataset_s{args.stage}_hf")
 
-dataset.push_to_hub("Leppy-oss/FTC-Lens")
+dataset.push_to_hub(f"Leppy-oss/ftc-lens-stage{args.stage}")

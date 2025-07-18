@@ -32,7 +32,7 @@ def prepare_split(split_name, split_lines):
     
     with open(split_dir / "metadata.jsonl", "w") as meta_out:
         for i, entry in enumerate(tqdm(split_lines, desc=f"Copying {split_name} images")):
-            old_img_path = images_dir / entry["image"]
+            old_img_path = images_dir / f"images/{entry["image"]}"
             if not old_img_path.exists():
                 raise FileNotFoundError(f"Image not found: {old_img_path}")
             

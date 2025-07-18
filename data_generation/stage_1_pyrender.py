@@ -6,7 +6,7 @@ import trimesh
 import pyrender
 import numpy as np
 from PIL import Image
-from math import pi
+from random import shuffle, sample
 from itertools import product
 
 MODEL_DIR = "models/"
@@ -40,9 +40,11 @@ def random_grayscale_color(min_val=0.2, max_val=0.8, tint_strength=0.0):
     return np.array([r, g, b])
 
 
-def random_object_poses(n_rot=3, max_offset=0.05):
+def random_object_poses(n_rot=2, total_n=4, max_offset=0.05):
     angles = np.linspace(-45, 45, n_rot) + np.random.uniform(-5, 5, size=n_rot)
     rotations = list(product(angles, repeat=3))
+    shuffle(rotations)
+    rotations = rotations[:total_n]
     poses = []
     for yaw, pitch, roll in rotations:
         y, p, r = np.radians([yaw, pitch, roll])
@@ -60,16 +62,31 @@ def random_object_poses(n_rot=3, max_offset=0.05):
 
         pose = np.eye(4)
         pose[:3, :3] = R
-        pose[:3, 3] = np.random.uniform(
-            -max_offset, max_offset, size=3
-        )
+        pose[:3, 3] = np.random.uniform(-max_offset, max_offset, size=3)
         poses.append(pose)
     return poses
 
 
+def random_assembly(meshes, part_names):
+    n_parts = np.random.randint(2, min(5, len(meshes) + 1))  # 2–4 parts
+    indices = sample(range(len(meshes)), n_parts)
+    combined = None
+    used_names = []
+
+    for idx in indices:
+        mesh = meshes[idx].copy()
+        offset = np.random.uniform(-0.5, 0.5, size=3)
+        mesh.apply_translation(offset)
+        used_names.append(part_names[idx])
+        combined = mesh if combined is None else combined + mesh
+
+    return combined, used_names
+
+
 def render_single_view(mesh, object_pose, renderer):
     scene = pyrender.Scene(
-        bg_color=np.append(random_grayscale_color(0.9, 0.975), 1.0), ambient_light=[0.3, 0.3, 0.3, 1.0]
+        bg_color=np.append(random_grayscale_color(0.9, 0.975), 1.0),
+        ambient_light=[0.3, 0.3, 0.3, 1.0]
     )
 
     material = pyrender.MetallicRoughnessMaterial(
@@ -102,27 +119,38 @@ def render_single_view(mesh, object_pose, renderer):
 def main():
     start = timeit.default_timer()
     clear_output_dirs()
+
     step_files = [
         f for f in os.listdir(MODEL_DIR) if f.endswith(".STEP") or f.endswith(".step")
     ]
 
+    all_meshes = []
+    all_names = []
+
+    for step_file in step_files:
+        mesh = load_step_part(os.path.join(MODEL_DIR, step_file))
+        all_meshes.append(mesh)
+        all_names.append(os.path.splitext(step_file)[0])
+
     r = pyrender.OffscreenRenderer(viewport_width=IMG_SIZE, viewport_height=IMG_SIZE)
 
     with open(METADATA_PATH, "w") as fj:
-        for step_file in step_files:
-            mesh = load_step_part(os.path.join(MODEL_DIR, step_file))
-            part_name = os.path.splitext(step_file)[0]
-            print(f"Rendering {part_name}")
-
+        for i in range(150):  # or however many composite objects you want
+            mesh, used_parts = random_assembly(all_meshes, all_names)
             obj_poses = random_object_poses()
 
-            for i, pose in enumerate(obj_poses):
+            for j, pose in enumerate(obj_poses):
                 img = render_single_view(mesh, pose, r)
-                img_path = os.path.join(IMG_PATH, f"{part_name}_{i}.png")
-                Image.fromarray(img).save(img_path)
+                img_name = f"combo_{i}_{j}.png"
+                Image.fromarray(img).save(os.path.join(IMG_PATH, img_name))
 
-                json_line = {"image": f"{part_name}_{i}.png", "label": part_name}
-                fj.write(json.dumps(json_line) + "\n")
+                metadata = {
+                    "image": img_name,
+                    "label": "+".join(used_parts)
+                }
+                fj.write(json.dumps(metadata) + "\n")
+
+            print(f"Rendered composite {i} using: {used_parts}")
 
     r.delete()
     stop = timeit.default_timer()
