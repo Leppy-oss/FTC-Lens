@@ -2,6 +2,7 @@ import os
 import json
 import shutil
 import timeit
+import random
 import trimesh
 import pyrender
 import numpy as np
@@ -31,90 +32,220 @@ def load_step_part(filepath):
     return mesh
 
 
-def place_parts(meshes):
-    placed_meshes = []
-    cursor = np.array([0.0, 0.0, 0.0])
-    row_height = 0.0
-    max_row_width = 2.5  # Max width before wrapping to a new row
-    row_origin = np.array([0.0, 0.0, 0.0])
-
-    for mesh in meshes:
-        bbox = mesh.bounding_box.extents
-        width, height, depth = bbox
-
-        if cursor[0] + width > max_row_width:
-            cursor[0] = 0.0
-            cursor[2] += row_height + SPACING
-            row_height = 0.0
-
-        translation = cursor + np.array([width / 2, 0, depth / 2])
-        mesh_copy = mesh.copy()
-        mesh_copy.apply_translation(translation)
-        placed_meshes.append(mesh_copy)
-
-        cursor[0] += width + SPACING
-        row_height = max(row_height, depth)
-
-    return placed_meshes
+def random_grayscale_color(min_val=0.2, max_val=0.8, tint_strength=0.0):
+    base = np.random.uniform(min_val, max_val)
+    r = np.clip(base + np.random.uniform(-tint_strength, tint_strength), 0, 1)
+    g = np.clip(base + np.random.uniform(-tint_strength, tint_strength), 0, 1)
+    b = np.clip(base + np.random.uniform(-tint_strength, tint_strength), 0, 1)
+    return np.array([r, g, b])
 
 
-def get_combined_bounds(meshes):
-    all_bounds = [mesh.bounds for mesh in meshes]
-    mins = np.min([b[0] for b in all_bounds], axis=0)
-    maxs = np.max([b[1] for b in all_bounds], axis=0)
-    return mins, maxs
-
-
-def compute_camera_pose_and_distance(bounds_min, bounds_max):
-    center = (bounds_min + bounds_max) / 2
-    size = bounds_max - bounds_min
-    diagonal = np.linalg.norm(size)
-
-    # Isometric view (viewed from corner of bounding box)
-    cam_position = center + np.array([1, 1, 1]) * diagonal
-    cam_position = cam_position / np.linalg.norm(cam_position) * diagonal * 5
-
-    # Create a simple look-at matrix
-    forward = center - cam_position
+def look_at(v_e, v_t=np.array((0, 0, 0)), up=np.array((0, 1, 0))):
+    forward = v_t - v_e
     forward /= np.linalg.norm(forward)
-    right = np.cross([0, 1, 0], forward)
-    right /= np.linalg.norm(right)
-    up = np.cross(forward, right)
 
-    pose = np.eye(4)
-    pose[:3, 0] = right
-    pose[:3, 1] = up
-    pose[:3, 2] = -forward
-    pose[:3, 3] = cam_position
+    right = np.cross(forward, up)
+    right /= np.linalg.norm(right)
+
+    true_up = np.cross(right, forward)
+
+    rot = np.eye(4)
+    rot[:3, 0] = right
+    rot[:3, 1] = true_up
+    rot[:3, 2] = -forward
+
+    trans = np.eye(4)
+    trans[:3, 3] = v_e
+
+    pose = trans @ rot
     return pose
 
 
-def render_scene(meshes, renderer):
-    scene = pyrender.Scene(
-        bg_color=[0.95, 0.95, 0.95, 1.0], ambient_light=[0.3, 0.3, 0.3, 1.0]
-    )
+def intersects(bounds1, bounds2):
+    return np.all(bounds1[0] < bounds2[1]) and np.all(bounds1[1] > bounds2[0])
 
-    # Add meshes
-    for mesh in meshes:
-        material = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=[0.4, 0.4, 0.4, 1.0],
-            metallicFactor=0.2,
-            roughnessFactor=0.7,
+
+def get_random_face_transform(target_mesh, source_mesh):
+    target_box = target_mesh.bounding_box_oriented
+    source_box = source_mesh.bounding_box_oriented
+
+    target_face = random.randint(0, 5)
+    source_face = random.randint(0, 5)
+
+    target_min, target_max = target_box.bounds
+    source_min, source_max = source_box.bounds
+
+    def get_face_vector(idx, min_, max_):
+        axis = idx % 3
+        direction = -1 if idx < 3 else 1
+        face_center = np.array(
+            [
+                (
+                    min_[i]
+                    if direction == -1 and i == axis
+                    else (
+                        max_[i]
+                        if direction == 1 and i == axis
+                        else (min_[i] + max_[i]) / 2
+                    )
+                )
+                for i in range(3)
+            ]
         )
-        render_mesh = pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False)
-        scene.add(render_mesh)
+        normal = np.eye(3)[axis] * direction
+        return face_center, normal
 
-    bounds_min, bounds_max = get_combined_bounds(meshes)
-    cam_pose = compute_camera_pose_and_distance(bounds_min, bounds_max)
+    t_face_center, t_normal = get_face_vector(target_face, target_min, target_max)
+    s_face_center, s_normal = get_face_vector(source_face, source_min, source_max)
 
-    camera = pyrender.PerspectiveCamera(yfov=np.pi / 4.0)
+    v1 = s_normal / np.linalg.norm(s_normal)
+    v2 = -t_normal / np.linalg.norm(t_normal)
+
+    axis = np.cross(v1, v2)
+    angle = np.arccos(np.clip(np.dot(v1, v2), -1, 1))
+    if np.linalg.norm(axis) < 1e-6:
+        R_mat = np.eye(3)
+    else:
+        axis = axis / np.linalg.norm(axis)
+        R_mat = trimesh.transformations.rotation_matrix(angle, axis)[:3, :3]
+
+    s_transformed_face = R_mat @ s_face_center
+    translation = t_face_center - s_transformed_face
+
+    rotation_euler = R.from_matrix(R_mat).as_euler("xyz", degrees=True)
+
+    return translation, rotation_euler
+
+
+def assemble_meshes(mesh_list, max_attempts=100):
+    placed = []
+    poses = []  # (position, rotation_euler_deg)
+
+    mesh0 = mesh_list[0].copy()
+    placed.append(mesh0)
+    meshes_transformed = [mesh0]
+    poses.append((np.zeros(3), np.zeros(3)))  # origin at (0,0,0) with no rotation
+    origin_index = 0
+
+    for mesh in mesh_list[1:]:
+        added = False
+        attempts = 0
+
+        while not added and attempts < max_attempts:
+            target = random.choice(placed)
+            position, rotation_euler = get_random_face_transform(target, mesh)
+
+            # Build transformation matrix
+            T = np.eye(4)
+            T[:3, :3] = R.from_euler("xyz", rotation_euler, degrees=True).as_matrix()
+            T[:3, 3] = position
+
+            mesh_transformed = mesh.copy()
+            mesh_transformed.apply_transform(T)
+
+            if not any(intersects(mesh_transformed.bounds, p.bounds) for p in placed):
+                placed.append(mesh_transformed)
+                meshes_transformed.append(mesh_transformed)
+                poses.append((position, rotation_euler))
+                added = True
+            attempts += 1
+
+    print(f"Using {len(meshes_transformed)} total meshes")
+
+    return meshes_transformed, poses, origin_index
+
+
+def path_to_mesh(path):
+    lines = []
+    for entity in path.entities:
+        segment = entity.discrete(path.vertices)
+        for i in range(len(segment) - 1):
+            lines.append(segment[i])
+            lines.append(segment[i + 1])
+
+    lines_np = np.array(lines, dtype=np.float32)
+
+    line_mesh = pyrender.Primitive(
+        positions=lines_np,
+        mode=1,
+        material=pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=(0, 0, 0),
+            metallicFactor=0.8,
+            roughnessFactor=0.8,
+        ),
+    )
+    return pyrender.Mesh([line_mesh])
+
+
+def render_scene_pyrender(meshes_transformed: list[trimesh.Trimesh], r: pyrender.Renderer):
+    full_mesh = trimesh.Scene(meshes_transformed).dump(concatenate=True)
+    bounds = full_mesh.bounds
+    center = full_mesh.centroid
+    size = np.linalg.norm(bounds[1] - bounds[0])
+
+    direction = np.array([1, 1, 1])
+    direction = direction / np.linalg.norm(direction)
+
+    camera_distance = size * 1.5  # adjust zoom level
+    cam_position = center + direction * camera_distance
+    cam_pose = look_at(cam_position, center)
+
+    scene = pyrender.Scene(
+        bg_color=np.append(random_grayscale_color(0.9, 0.975), 1.0),
+        ambient_light=[0.3, 0.3, 0.3, 1.0],
+    )
+    for mesh in meshes_transformed:
+        m = mesh.copy()
+        m.merge_vertices()
+        material = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=np.append(random_grayscale_color(0.35, 0.45), 1.0),
+            metallicFactor=0.8,
+            roughnessFactor=0.8,
+        )
+        pymesh = pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False)
+        scene.add(pymesh)
+        scene.add(
+            path_to_mesh(
+                trimesh.load_path(
+                    m.vertices[
+                        m.face_adjacency_edges[
+                            m.face_adjacency_angles
+                            >= np.radians(
+                                90 - max(0, min((200000 - len(m.vertices)) * 0.001, 80))
+                            )
+                        ]
+                    ]
+                )
+            )
+        )
+
+    camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0)
+    # camera = pyrender.OrthographicCamera(xmag=size, ymag=size)  # Optional for isometric flatness
+
     scene.add(camera, pose=cam_pose)
 
+    # light at the camera position
     light = pyrender.DirectionalLight(color=np.ones(3), intensity=3.0)
     scene.add(light, pose=cam_pose)
 
-    color, _ = renderer.render(scene)
+    color, _ = r.render(scene)
     return color
+
+def export_transforms(poses, origin_index, mesh_names):
+    data = {
+        "origin_name": mesh_names[origin_index],
+        "transforms": [],
+    }
+
+    for i, (pos, rot) in enumerate(poses):
+        entry = {
+            "name": mesh_names[i],
+            "Position": pos,
+            "Rotation": rot,
+        }
+        data["transforms"].append(entry)
+
+    return data
 
 
 def main():
