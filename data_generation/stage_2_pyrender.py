@@ -16,10 +16,9 @@ IMG_PATH = os.path.join(OUTPUT_DIR, "images/")
 METADATA_PATH = os.path.join(OUTPUT_DIR, "metadata.jsonl")
 
 IMG_SIZE = 512
-PARTS_PER_SCENE = (3, 15)
-VIEWS_PER_SCENE = (1, 4)
-SCENE_COUNT = 100
-MAX_Z_SPREAD = 1.0  # Units of height Z spread limit
+PARTS_PER_SCENE = (6, 4, 3, 20) # mu, sigma, min, max
+VIEWS_PER_SCENE = (1, 2, 1, 6) # mu, sigma, min, max
+SCENE_COUNT = 5000
 
 xyzms = xyzms = [v for v in product((-1, 0, 1), repeat=3) if v != (0, 0, 0) and sum(x != 0 for x in v) in (1, 3)]
 
@@ -178,10 +177,6 @@ def assemble(mesh_list, max_attempts=100):
         new_pos = pos - offset
         poses[i] = (new_pos, rot)
 
-    print(
-        f"Using {len(meshes_transformed)} total meshes, centered on mesh index {reference_idx}"
-    )
-
     return meshes_transformed, poses, reference_idx
 
 
@@ -247,7 +242,7 @@ def render_scene(meshes_transformed: list[trimesh.Trimesh], r: pyrender.Renderer
                         m.face_adjacency_edges[
                             m.face_adjacency_angles
                             >= np.radians(
-                                10 if len(m.vertices) < 75000 else 90
+                                10 if len(m.vertices) < 40000 else 60 if len(m.vertices) < 100000 else 90
                             )
                         ]
                     ]
@@ -284,7 +279,7 @@ def export_transforms(poses, origin_index, mesh_names):
 def convert_and_sort(data):
     def convert(obj):
         if isinstance(obj, np.ndarray):
-            return [round(v, 4) for v in obj.tolist()]
+            return [round(v, 2) for v in obj.tolist()]
         elif isinstance(obj, dict):
             return {k: convert(v) for k, v in obj.items()}
         elif isinstance(obj, list):
@@ -312,7 +307,7 @@ def main():
 
     with open(METADATA_PATH, "w") as meta_file:
         for i in range(SCENE_COUNT):
-            file_names = random.sample(all_step_files, random.randint(*PARTS_PER_SCENE))
+            file_names = random.sample(all_step_files, np.clip(round(random.normalvariate(PARTS_PER_SCENE[0], PARTS_PER_SCENE[1])), PARTS_PER_SCENE[2], PARTS_PER_SCENE[3]))
             part_names = [os.path.splitext(f)[0] for f in file_names]
 
             print(f"[{i+1}/{SCENE_COUNT}] Parts (n={len(part_names)}): {', '.join(part_names)}")
@@ -325,14 +320,12 @@ def main():
                 )
                 for f in file_names
             ]
-            print("Loaded meshes")
 
             assembled_scene, poses, origin_index = assemble(meshes)
-            print("Assembled scene")
 
             xyzms_to_render = [(1, 1, 1)] + random.sample(
                 [xyzm for xyzm in xyzms if xyzm != (1, 1, 1)],
-                random.randint(*VIEWS_PER_SCENE),
+                np.clip(round(random.normalvariate(VIEWS_PER_SCENE[0], VIEWS_PER_SCENE[1])), VIEWS_PER_SCENE[2], VIEWS_PER_SCENE[3])
             )
             data = export_transforms(poses, origin_index, part_names)
 
@@ -350,8 +343,6 @@ def main():
                 "label": convert_and_sort(data["transforms"]),
             }
             meta_file.write(json.dumps(metadata) + "\n")
-
-            break
 
     r.delete()
     stop = timeit.default_timer()
