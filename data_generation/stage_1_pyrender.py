@@ -116,46 +116,41 @@ def render_single_view(mesh, object_pose, renderer):
     return color
 
 
-def main():
-    start = timeit.default_timer()
-    clear_output_dirs()
+start = timeit.default_timer()
+clear_output_dirs()
 
-    step_files = [
-        f for f in os.listdir(MODEL_DIR) if f.endswith(".STEP") or f.endswith(".step")
-    ]
+step_files = [
+    f for f in os.listdir(MODEL_DIR) if f.endswith(".STEP") or f.endswith(".step")
+]
 
-    all_meshes = []
-    all_names = []
+all_meshes = []
+all_names = []
 
-    for step_file in step_files:
-        mesh = load_step_part(os.path.join(MODEL_DIR, step_file))
-        all_meshes.append(mesh)
-        all_names.append(os.path.splitext(step_file)[0])
+for step_file in step_files:
+    mesh = load_step_part(os.path.join(MODEL_DIR, step_file))
+    all_meshes.append(mesh)
+    all_names.append(os.path.splitext(step_file)[0])
 
-    r = pyrender.OffscreenRenderer(viewport_width=IMG_SIZE, viewport_height=IMG_SIZE)
+r = pyrender.OffscreenRenderer(viewport_width=IMG_SIZE, viewport_height=IMG_SIZE)
 
-    with open(METADATA_PATH, "w") as fj:
-        for i in range(150):  # or however many composite objects you want
-            mesh, used_parts = random_assembly(all_meshes, all_names)
-            obj_poses = random_object_poses()
+with open(METADATA_PATH, "w") as fj:
+    for i in range(150):  # or however many composite objects you want
+        mesh, used_parts = random_assembly(all_meshes, all_names)
+        obj_poses = random_object_poses()
 
-            for j, pose in enumerate(obj_poses):
-                img = render_single_view(mesh, pose, r)
-                img_name = f"combo_{i}_{j}.png"
-                Image.fromarray(img).save(os.path.join(IMG_PATH, img_name))
+        for j, pose in enumerate(obj_poses):
+            img = render_single_view(mesh, pose, r)
+            img_name = f"combo_{i}_{j}.png"
+            Image.fromarray(img).save(os.path.join(IMG_PATH, img_name))
 
-                metadata = {
-                    "image": img_name,
-                    "label": "+".join(used_parts)
-                }
-                fj.write(json.dumps(metadata) + "\n")
+            metadata = {
+                "image": img_name,
+                "label": "+".join(used_parts)
+            }
+            fj.write(json.dumps(metadata) + "\n")
 
-            print(f"Rendered composite {i} using: {used_parts}")
+        print(f"Rendered composite {i} using: {used_parts}")
 
-    r.delete()
-    stop = timeit.default_timer()
-    print(f"Finished in {(stop - start):.2f}s. Metadata saved to {METADATA_PATH}")
-
-
-if __name__ == "__main__":
-    main()
+r.delete()
+stop = timeit.default_timer()
+print(f"Finished in {(stop - start):.2f}s. Metadata saved to {METADATA_PATH}")

@@ -1,13 +1,17 @@
 import os
+import gc
 import json
 import shutil
+import psutil
 import timeit
 import random
 import trimesh
 import pyrender
+import warnings
 import numpy as np
 from PIL import Image
 from itertools import product
+from large_models import large_models as large_step_files
 from scipy.spatial.transform import Rotation as R
 
 MODEL_DIR = "models/"
@@ -15,12 +19,19 @@ OUTPUT_DIR = "dataset_s2/"
 IMG_PATH = os.path.join(OUTPUT_DIR, "images/")
 METADATA_PATH = os.path.join(OUTPUT_DIR, "metadata.jsonl")
 
-IMG_SIZE = 512
-PARTS_PER_SCENE = (6, 4, 3, 20) # mu, sigma, min, max
-VIEWS_PER_SCENE = (1, 2, 1, 6) # mu, sigma, min, max
+IMG_SIZE = 1024
+SMALL_PARTS_PER_SCENE = (6, 4, 3, 20)  # mu, sigma, min, max
+LARGE_PARTS_PER_SCENE = (1, 2, 0, 4)  # mu, sigma, min, max
+VIEWS_PER_SCENE = (1, 2, 1, 6)  # mu, sigma, min, max
 SCENE_COUNT = 5000
 
-xyzms = xyzms = [v for v in product((-1, 0, 1), repeat=3) if v != (0, 0, 0) and sum(x != 0 for x in v) in (1, 3)]
+LARGE_PART_CHANCE = 0.3
+
+all_xyzms = [
+    v
+    for v in product((-1, 0, 1), repeat=3)
+    if v != (0, 0, 0) and sum(x != 0 for x in v) in (1, 3)
+]
 
 
 def clear_output_dirs():
@@ -31,7 +42,7 @@ def clear_output_dirs():
 
 
 def load_step_part(filepath):
-    mesh = trimesh.load(filepath, force="mesh")
+    mesh = trimesh.load_mesh(filepath)
     mesh.apply_translation(-mesh.centroid)
     mesh.apply_scale(1000)
     return mesh
@@ -123,7 +134,7 @@ def rand_face_transform(target_mesh, source_mesh):
     return translation, rotation_euler
 
 
-def assemble(mesh_list, max_attempts=100):
+def assemble(mesh_list, outline_list, max_attempts=100):
     placed = []
     poses = []
 
@@ -133,13 +144,16 @@ def assemble(mesh_list, max_attempts=100):
 
     mesh0 = mesh_list[0].copy()
     mesh0.apply_transform(T0)
-    placed.append(mesh0)
     meshes_transformed = [mesh0]
-    poses.append(
-        (np.zeros(3), rot_euler_first)
-    )
 
-    for mesh in mesh_list[1:]:
+    outline0 = outline_list[0].copy()
+    outline0.apply_transform(T0)
+    outlines_transformed = [outline0]
+
+    placed.append(mesh0)
+    poses.append((np.zeros(3), rot_euler_first))
+
+    for mesh, outline in zip(mesh_list[1:], outline_list[1:]):
         added = False
         attempts = 0
 
@@ -156,28 +170,36 @@ def assemble(mesh_list, max_attempts=100):
 
             if not any(intersects(mesh_transformed.bounds, p.bounds) for p in placed):
                 placed.append(mesh_transformed)
+
                 meshes_transformed.append(mesh_transformed)
+
+                outline_transformed = outline.copy()
+                outline_transformed.apply_transform(T)
+                outlines_transformed.append(outline_transformed)
+
                 poses.append((position, rotation_euler))
                 added = True
+
             attempts += 1
 
     all_bounds = np.vstack([m.bounds for m in meshes_transformed])
-    overall_centroid = (np.min(all_bounds, axis=0) + np.max(all_bounds, axis=0)) / 2
+    com = (np.min(all_bounds, axis=0) + np.max(all_bounds, axis=0)) / 2 # centroid
 
     mesh_centers = np.array([m.bounding_box.centroid for m in meshes_transformed])
-    distances = np.linalg.norm(mesh_centers - overall_centroid, axis=1)
-    reference_idx = np.argmin(distances)
-    reference_center = mesh_centers[reference_idx]
+    distances = np.linalg.norm(mesh_centers - com, axis=1)
+    origin_idx = np.argmin(distances)
+    origin = mesh_centers[origin_idx]
 
-    offset = reference_center
+    offset = origin
 
-    for i, m in enumerate(meshes_transformed):
+    for i, (m, o) in enumerate(zip(meshes_transformed, outlines_transformed)):
         m.apply_translation(-offset)
+        o.apply_translation(-offset)
         pos, rot = poses[i]
         new_pos = pos - offset
         poses[i] = (new_pos, rot)
 
-    return meshes_transformed, poses, reference_idx
+    return meshes_transformed, outlines_transformed, poses, origin_idx
 
 
 def path_to_mesh(path):
@@ -202,7 +224,9 @@ def path_to_mesh(path):
     return pyrender.Mesh([line_mesh])
 
 
-def render_scene(meshes_transformed: list[trimesh.Trimesh], r: pyrender.Renderer, xyzm: tuple[int]):
+def render_scene(
+    meshes_transformed: list[trimesh.Trimesh], outlines_transformed, r: pyrender.Renderer, xyzm: tuple[int]
+):
     full_mesh = trimesh.Scene(meshes_transformed).to_geometry()
     bounds = full_mesh.bounds
     center = full_mesh.centroid
@@ -220,38 +244,22 @@ def render_scene(meshes_transformed: list[trimesh.Trimesh], r: pyrender.Renderer
         ambient_light=[0.3, 0.3, 0.3, 1.0],
     )
 
-    for xyzm in xyzms:
+    for xyzm in all_xyzms:
         light_pose = look_at(cam_dist * np.array(xyzm, dtype=np.dtypes.Float64DType))
         light = pyrender.DirectionalLight(intensity=2.5)
         scene.add(light, pose=light_pose)
 
-    for mesh in meshes_transformed:
-        m = mesh.copy()
-        m.merge_vertices()
-        material = pyrender.MetallicRoughnessMaterial(
-            baseColorFactor=np.append(random_grayscale_color(0.35, 0.45), 1.0),
-            metallicFactor=0.8,
-            roughnessFactor=0.8,
-        )
-        pymesh = pyrender.Mesh.from_trimesh(mesh, material=material, smooth=False)
-        scene.add(pymesh)
+    for mesh, outline in zip(meshes_transformed, outlines_transformed):
         scene.add(
-            path_to_mesh(
-                trimesh.load_path(
-                    m.vertices[
-                        m.face_adjacency_edges[
-                            m.face_adjacency_angles
-                            >= np.radians(
-                                10 if len(m.vertices) < 40000 else 60 if len(m.vertices) < 100000 else 90
-                            )
-                        ]
-                    ]
-                )
-            )
+            pyrender.Mesh.from_trimesh(mesh, material=pyrender.MetallicRoughnessMaterial(
+                baseColorFactor=np.append(random_grayscale_color(0.35, 0.45), 1.0),
+                metallicFactor=0.8,
+                roughnessFactor=0.8,
+            ), smooth=False)
         )
+        scene.add(path_to_mesh(outline))
 
     camera = pyrender.PerspectiveCamera(yfov=np.pi / 3.0)
-    # camera = pyrender.OrthographicCamera(xmag=size, ymag=size)
 
     scene.add(camera, pose=cam_pose)
 
@@ -296,58 +304,120 @@ def convert_and_sort(data):
 
     return json.dumps(converted_data)
 
+process = psutil.Process(os.getpid())
+clear_output_dirs()
 
-def main():
-    start = timeit.default_timer()
-    clear_output_dirs()
+all_step_files = [f for f in os.listdir(MODEL_DIR) if f.lower().endswith(".step")]
+small_step_files = np.setdiff1d(all_step_files, large_step_files)
+meshes_cache = {}
+outlines_cache = {}
+r = pyrender.OffscreenRenderer(IMG_SIZE, IMG_SIZE)
+peak_memory_usage = -1
+t_mesh_load_time = 0
+t_outline_load_time = 0
+t_render_time = 0
+last_memory_usage = process.memory_info().rss / (1024 * 1024)
 
-    all_step_files = [f for f in os.listdir(MODEL_DIR) if f.lower().endswith(".step")]
-    meshes_cache = {}
-    r = pyrender.OffscreenRenderer(IMG_SIZE, IMG_SIZE)
+warnings.filterwarnings("ignore", category=UserWarning)  # ignore annoying scipy gimbal lock warnings
+with open(METADATA_PATH, "w") as meta_file:
+    for i in range(SCENE_COUNT):
+        file_names = np.random.choice(
+            small_step_files,
+            np.clip(
+                round(
+                    random.normalvariate(
+                        SMALL_PARTS_PER_SCENE[0], SMALL_PARTS_PER_SCENE[1]
+                    )
+                ),
+                SMALL_PARTS_PER_SCENE[2],
+                SMALL_PARTS_PER_SCENE[3],
+            ),
+            replace=False,
+        )
 
-    with open(METADATA_PATH, "w") as meta_file:
-        for i in range(SCENE_COUNT):
-            file_names = random.sample(all_step_files, np.clip(round(random.normalvariate(PARTS_PER_SCENE[0], PARTS_PER_SCENE[1])), PARTS_PER_SCENE[2], PARTS_PER_SCENE[3]))
-            part_names = [os.path.splitext(f)[0] for f in file_names]
-
-            print(f"[{i+1}/{SCENE_COUNT}] Parts (n={len(part_names)}): {', '.join(part_names)}")
-
-            meshes = [
-                (
-                    load_step_part(os.path.join(MODEL_DIR, f))
-                    if f not in meshes_cache
-                    else meshes_cache[f]
-                )
-                for f in file_names
-            ]
-
-            assembled_scene, poses, origin_index = assemble(meshes)
-
-            xyzms_to_render = [(1, 1, 1)] + random.sample(
-                [xyzm for xyzm in xyzms if xyzm != (1, 1, 1)],
-                np.clip(round(random.normalvariate(VIEWS_PER_SCENE[0], VIEWS_PER_SCENE[1])), VIEWS_PER_SCENE[2], VIEWS_PER_SCENE[3])
+        large_file_names = []
+        if random.random() < LARGE_PART_CHANCE:
+            large_file_names = np.random.choice(
+                large_step_files,
+                np.clip(
+                    round(
+                        random.normalvariate(
+                            LARGE_PARTS_PER_SCENE[0], LARGE_PARTS_PER_SCENE[1]
+                        )
+                    ),
+                    LARGE_PARTS_PER_SCENE[2],
+                    LARGE_PARTS_PER_SCENE[3],
+                ),
+                replace=False,
             )
-            data = export_transforms(poses, origin_index, part_names)
 
-            img_paths = []
+        file_names = np.concatenate((file_names, large_file_names))
+        part_names = [os.path.splitext(f)[0] for f in file_names]
+        print(f"[{i+1}/{SCENE_COUNT}] Parts (n={len(file_names) - len(large_file_names)}S+{len(large_file_names)}L): {', '.join(part_names)}")
 
-            for ixyzm, xyzm in enumerate(xyzms_to_render):
-                img = render_scene(assembled_scene, r, xyzm)
-                img_path = f"scene_{i:05d}_view_{ixyzm}.png"
-                img_paths.append(img_path)
-                Image.fromarray(img).save(os.path.join(IMG_PATH, img_path))
+        mesh_load_start = timeit.default_timer()
+        meshes = [
+            load_step_part(os.path.join(MODEL_DIR, f)) if f in large_file_names 
+            else meshes_cache.setdefault(f, load_step_part(os.path.join(MODEL_DIR, f)))
+            for f in file_names
+        ]
+        mesh_load_time = timeit.default_timer() - mesh_load_start
+        t_mesh_load_time += mesh_load_time
 
-            metadata = {
-                "file_names": img_paths,
-                "origin": data["origin_name"],
-                "label": convert_and_sort(data["transforms"]),
-            }
-            meta_file.write(json.dumps(metadata) + "\n")
+        outline_load_start = timeit.default_timer()
 
-    r.delete()
-    stop = timeit.default_timer()
-    print(f"Finished in {(stop - start):.2f}s. Metadata saved to {METADATA_PATH}")
+        def load_outline(f, mesh):
+            def compute_outline(mesh):
+                m = mesh.copy()
+                m.merge_vertices()
+                thresh = 10 if len(m.vertices) < 100000 else 30 if len(m.vertices) < 150000 else 90
+                return trimesh.load_path(m.vertices[m.face_adjacency_edges[m.face_adjacency_angles >= np.radians(thresh)]])
+            
+            return compute_outline(mesh) if f in large_file_names else outlines_cache.setdefault(f, compute_outline(mesh))
+        
+        outlines = [load_outline(f, mesh) for f, mesh in zip(file_names, meshes)]
+        outline_load_time = timeit.default_timer() - outline_load_start
+        t_outline_load_time += outline_load_time
 
+        render_start = timeit.default_timer()
+        meshes_transformed, outlines_transformed, poses, origin_index = assemble(meshes, outlines)
 
-if __name__ == "__main__":
-    main()
+        xyzms = [(1, 1, 1)] + random.sample(
+            [xyzm for xyzm in all_xyzms if xyzm != (1, 1, 1)],
+            np.clip(
+                round(random.normalvariate(VIEWS_PER_SCENE[0], VIEWS_PER_SCENE[1])),
+                VIEWS_PER_SCENE[2],
+                VIEWS_PER_SCENE[3],
+            ),
+        )
+        data = export_transforms(poses, origin_index, part_names)
+
+        img_paths = []
+
+        for ixyzm, xyzm in enumerate(xyzms):
+            img = render_scene(meshes_transformed, outlines_transformed, r, xyzm)
+            img_path = f"scene_{i:05d}_view_{ixyzm}.png"
+            img_paths.append(img_path)
+            Image.fromarray(img).save(os.path.join(IMG_PATH, img_path))
+
+        metadata = {
+            "file_names": img_paths,
+            "origin": data["origin_name"],
+            "label": convert_and_sort(data["transforms"]),
+        }
+
+        meta_file.write(json.dumps(metadata) + "\n")
+        meta_file.flush() # write in real time
+        render_time = timeit.default_timer() - render_start
+        t_render_time += render_time
+
+        memory_usage = process.memory_info().rss / (1024 * 1024)
+        print(f"Rendered all scenes in {(mesh_load_time + outline_load_time + render_time):.2f}s ({mesh_load_time:.2f} mesh / {outline_load_time:.2f} outline / {render_time:.2f} render). Current memory consumption {memory_usage:.2f} MiB ({((memory_usage - last_memory_usage) * 1024):.2f} KiB delta). Current cache size is {len(meshes_cache)}.")
+        last_memory_usage = memory_usage
+        peak_memory_usage = max(peak_memory_usage, memory_usage)
+
+        del meshes_transformed, outlines_transformed
+        gc.collect()
+
+r.delete()
+print(f"Finished in {(t_mesh_load_time + t_outline_load_time + t_render_time):.2f}s ({t_mesh_load_time:.2f} mesh / {t_outline_load_time:.2f} outline / {t_render_time:.2f} render). Peak memory consumption {peak_memory_usage:.2f} MiB.")
