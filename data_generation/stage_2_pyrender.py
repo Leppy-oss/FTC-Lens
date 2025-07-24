@@ -20,10 +20,10 @@ IMG_PATH = os.path.join(OUTPUT_DIR, "images/")
 METADATA_PATH = os.path.join(OUTPUT_DIR, "metadata.jsonl")
 
 IMG_SIZE = 1024
-SMALL_PARTS_PER_SCENE = (3, 2, 1, 5)  # mu, sigma, min, max
+SMALL_PARTS_PER_SCENE = (4, 6, 2, 20)  # mu, sigma, min, max
 LARGE_PARTS_PER_SCENE = (1, 2, 0, 4)  # mu, sigma, min, max
-VIEWS_PER_SCENE = (2, 2, 1, 6)  # mu, sigma, min, max
-SCENE_COUNT = 1000
+VIEWS_PER_SCENE = (1, 2, 1, 4)  # mu, sigma, min, max
+SCENE_COUNT = 30000
 
 LARGE_PART_CHANCE = 0.0
 
@@ -326,7 +326,7 @@ with open(METADATA_PATH, "w") as meta_file:
                 SMALL_PARTS_PER_SCENE[2],
                 SMALL_PARTS_PER_SCENE[3],
             ),
-            replace=False,
+            replace=True,
         )
 
         large_file_names = []
@@ -342,7 +342,7 @@ with open(METADATA_PATH, "w") as meta_file:
                     LARGE_PARTS_PER_SCENE[2],
                     LARGE_PARTS_PER_SCENE[3],
                 ),
-                replace=False,
+                replace=True,
             )
 
         file_names = np.concatenate((file_names, large_file_names))
