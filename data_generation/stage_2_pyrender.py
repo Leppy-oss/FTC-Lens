@@ -14,22 +14,21 @@ from itertools import product
 from large_models import large_models as large_step_files
 from scipy.spatial.transform import Rotation as R
 
-MODEL_DIR = "models/"
-OUTPUT_DIR = "dataset_s2/"
+MODEL_DIR = "models_sm/"
+OUTPUT_DIR = "dataset_s2_sm/"
 IMG_PATH = os.path.join(OUTPUT_DIR, "images/")
 METADATA_PATH = os.path.join(OUTPUT_DIR, "metadata.jsonl")
 
 IMG_SIZE = 1024
-SMALL_PARTS_PER_SCENE = (6, 4, 3, 20)  # mu, sigma, min, max
+SMALL_PARTS_PER_SCENE = (3, 2, 1, 5)  # mu, sigma, min, max
 LARGE_PARTS_PER_SCENE = (1, 2, 0, 4)  # mu, sigma, min, max
-VIEWS_PER_SCENE = (1, 2, 1, 6)  # mu, sigma, min, max
-SCENE_COUNT = 5000
+VIEWS_PER_SCENE = (2, 2, 1, 6)  # mu, sigma, min, max
+SCENE_COUNT = 1000
 
-LARGE_PART_CHANCE = 0.3
+LARGE_PART_CHANCE = 0.0
 
 all_xyzms = [
-    v
-    for v in product((-1, 0, 1), repeat=3)
+    v for v in product((-1, 0, 1), repeat=3)
     if v != (0, 0, 0) and sum(x != 0 for x in v) in (1, 3)
 ]
 
@@ -224,10 +223,8 @@ def path_to_mesh(path):
     return pyrender.Mesh([line_mesh])
 
 
-def render_scene(
-    meshes_transformed: list[trimesh.Trimesh], outlines_transformed, r: pyrender.Renderer, xyzm: tuple[int]
-):
-    full_mesh = trimesh.Scene(meshes_transformed).to_geometry()
+def render(m_transformed: list[trimesh.Trimesh], o_transformed, r: pyrender.Renderer, xyzm: tuple[int]):
+    full_mesh = trimesh.Scene(m_transformed).to_geometry()
     bounds = full_mesh.bounds
     center = full_mesh.centroid
     size = np.linalg.norm(bounds[1] - bounds[0])
@@ -239,17 +236,14 @@ def render_scene(
     cam_position = center + direction * cam_dist
     cam_pose = look_at(cam_position, center)
 
-    scene = pyrender.Scene(
-        bg_color=np.append(random_grayscale_color(0.9, 0.975), 1.0),
-        ambient_light=[0.3, 0.3, 0.3, 1.0],
-    )
+    scene = pyrender.Scene(bg_color=np.append(random_grayscale_color(0.9, 0.975), 1.0), ambient_light=[0.3, 0.3, 0.3, 1.0])
 
     for xyzm in all_xyzms:
         light_pose = look_at(cam_dist * np.array(xyzm, dtype=np.dtypes.Float64DType))
         light = pyrender.DirectionalLight(intensity=2.5)
         scene.add(light, pose=light_pose)
 
-    for mesh, outline in zip(meshes_transformed, outlines_transformed):
+    for mesh, outline in zip(m_transformed, o_transformed):
         scene.add(
             pyrender.Mesh.from_trimesh(mesh, material=pyrender.MetallicRoughnessMaterial(
                 baseColorFactor=np.append(random_grayscale_color(0.35, 0.45), 1.0),
@@ -358,7 +352,7 @@ with open(METADATA_PATH, "w") as meta_file:
         mesh_load_start = timeit.default_timer()
         meshes = [
             load_step_part(os.path.join(MODEL_DIR, f)) if f in large_file_names 
-            else meshes_cache.setdefault(f, load_step_part(os.path.join(MODEL_DIR, f)))
+            else meshes_cache.get(f, False) or meshes_cache.setdefault(f, load_step_part(os.path.join(MODEL_DIR, f)))
             for f in file_names
         ]
         mesh_load_time = timeit.default_timer() - mesh_load_start
@@ -373,7 +367,7 @@ with open(METADATA_PATH, "w") as meta_file:
                 thresh = 10 if len(m.vertices) < 100000 else 30 if len(m.vertices) < 150000 else 90
                 return trimesh.load_path(m.vertices[m.face_adjacency_edges[m.face_adjacency_angles >= np.radians(thresh)]])
             
-            return compute_outline(mesh) if f in large_file_names else outlines_cache.setdefault(f, compute_outline(mesh))
+            return compute_outline(mesh) if f in large_file_names else outlines_cache.get(f, False) or outlines_cache.setdefault(f, compute_outline(mesh))
         
         outlines = [load_outline(f, mesh) for f, mesh in zip(file_names, meshes)]
         outline_load_time = timeit.default_timer() - outline_load_start
@@ -395,7 +389,7 @@ with open(METADATA_PATH, "w") as meta_file:
         img_paths = []
 
         for ixyzm, xyzm in enumerate(xyzms):
-            img = render_scene(meshes_transformed, outlines_transformed, r, xyzm)
+            img = render(meshes_transformed, outlines_transformed, r, xyzm)
             img_path = f"scene_{i:05d}_view_{ixyzm}.png"
             img_paths.append(img_path)
             Image.fromarray(img).save(os.path.join(IMG_PATH, img_path))

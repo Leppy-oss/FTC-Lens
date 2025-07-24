@@ -7,6 +7,6 @@ parser.add_argument("-s", "--stage", required=True, type=int, default="1", help=
 
 args = parser.parse_args()
 
-dataset = load_dataset("imagefolder", data_dir=f"dataset_s{args.stage}_hf")
+dataset = load_dataset("imagefolder", data_dir=f"dataset_s{args.stage}_sm_hf")
 
-dataset.push_to_hub(f"Leppy-oss/ftc-lens-stage{args.stage}")
+dataset.push_to_hub(f"Leppy-oss/ftc-lens-stage{args.stage}-sm")
