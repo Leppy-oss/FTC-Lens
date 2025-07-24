@@ -86,7 +86,7 @@ def path_to_mesh(path):
     return pyrender.Mesh([line_mesh])
 
 
-def generate_camera_positions(r=CAMERA_RADIUS, n_elev=8, n_azi=3):
+def generate_camera_positions(r=CAMERA_RADIUS, n_elev=16, n_azi=16):
     positions = []
 
     for i_a in range(n_azi):
