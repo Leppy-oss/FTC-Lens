@@ -370,7 +370,7 @@ def do_split(split_name):
             ]
             
             metadata = {
-                "image": os.path.join("images", img_path),
+                "file_name": os.path.join("images", img_path),
                 "label": json.dumps(convert_and_sort({"transforms": named_transforms}))
             }
 
