@@ -12,7 +12,7 @@ MODEL_DIR = "models_sm/"
 OUTPUT_DIR = "dataset_s1_sm/"
 IMG_PATH = os.path.join(OUTPUT_DIR, "images")
 METADATA_PATH = os.path.join(OUTPUT_DIR, "metadata.jsonl")
-IMG_SIZE = 512
+IMG_SIZE = 280
 CAMERA_RADIUS = 4
 
 all_xyzms = [

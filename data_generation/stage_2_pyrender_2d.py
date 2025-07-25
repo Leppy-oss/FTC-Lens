@@ -16,14 +16,16 @@ from scipy.spatial.transform import Rotation as R
 
 MODEL_DIR = "models_sm/"
 OUTPUT_DIR = "dataset_s2_sm/"
-IMG_PATH = os.path.join(OUTPUT_DIR, "images/")
-METADATA_PATH = os.path.join(OUTPUT_DIR, "metadata.jsonl")
+METADATA_FILE = "metadata.jsonl"
 
-IMG_SIZE = 512
-SMALL_PARTS_PER_SCENE = (1, 2, 2, 20)  # mu, sigma, min, max
-LARGE_PARTS_PER_SCENE = (1, 2, 0, 4)  # mu, sigma, min, max
-SCENE_COUNT = 10
-LARGE_PART_CHANCE = 0.0
+SPLIT = {
+    "train": 0.8,
+    "test": 0.2
+}
+
+IMG_SIZE = 280
+SMALL_PARTS_PER_SCENE = (3, 4, 1, 10)  # mu, sigma, min, max
+SCENE_COUNT = 100000
 
 all_xyzms = [
     v for v in product((-1, 0, 1), repeat=3)
@@ -32,7 +34,7 @@ all_xyzms = [
 
 
 def clear_output_dirs():
-    for path in [IMG_PATH]:
+    for path in [os.path.join(OUTPUT_DIR, p) for p in SPLIT.keys()]:
         if os.path.exists(path):
             shutil.rmtree(path)
         os.makedirs(path)
@@ -190,7 +192,7 @@ def assemble(meshes, outlines=None):
             raise RuntimeError(f"Could not place mesh after 100 attempts")
 
     # recentering
-    centroids = np.array([m.centroid for m in placed_meshes])
+    centroids = np.array([m.centroid + get_min_corner(m) for m in placed_meshes])
     assembly_centroid = np.mean(centroids, axis=0)
     distances = np.linalg.norm(centroids - assembly_centroid, axis=1)
     anchor_idx = int(np.argmin(distances))
@@ -198,8 +200,7 @@ def assemble(meshes, outlines=None):
 
     for mesh, outline in zip(placed_meshes, placed_outlines):
         mesh.apply_translation(offset)
-        if outline:
-            outline.apply_translation(offset)
+        outline.apply_translation(offset)
 
     final_transforms = []
     for i, (x_grid, z_grid) in enumerate(grid_positions):
@@ -240,15 +241,14 @@ def path_to_mesh(path):
 def render(m_transformed: list[trimesh.Trimesh], o_transformed, r: pyrender.Renderer, xyzm: tuple[int]):
     full_mesh = trimesh.Scene(m_transformed).to_geometry()
     bounds = full_mesh.bounds
-    center = full_mesh.centroid
     size = np.linalg.norm(bounds[1] - bounds[0])
 
     direction = xyzm
     direction = direction / np.linalg.norm(direction)
 
-    cam_dist = size * 1.25  # adjust zoom level
-    cam_position = center + direction * cam_dist
-    cam_pose = look_at(cam_position, center)
+    cam_dist = size * 0.7  # adjust zoom level
+    cam_position = direction * cam_dist
+    cam_pose = look_at(cam_position)
 
     scene = pyrender.Scene(bg_color=np.append(random_grayscale_color(0.9, 0.975), 1.0), ambient_light=[0.3, 0.3, 0.3, 1.0])
 
@@ -299,8 +299,7 @@ def convert_and_sort(data):
 process = psutil.Process(os.getpid())
 clear_output_dirs()
 
-all_step_files = [f for f in os.listdir(MODEL_DIR) if f.lower().endswith(".step")]
-small_step_files = np.setdiff1d(all_step_files, large_step_files)
+steps = [f for f in os.listdir(MODEL_DIR) if f.lower().endswith(".step")]
 meshes_cache = {}
 outlines_cache = {}
 r = pyrender.OffscreenRenderer(IMG_SIZE, IMG_SIZE)
@@ -311,98 +310,87 @@ t_render_time = 0
 last_memory_usage = process.memory_info().rss / (1024 * 1024)
 
 warnings.filterwarnings("ignore", category=UserWarning)  # ignore annoying scipy gimbal lock warnings
-with open(METADATA_PATH, "w") as meta_file:
-    for i in range(SCENE_COUNT):
-        file_names = np.random.choice(
-            small_step_files,
-            np.clip(
-                round(
-                    random.normalvariate(
-                        SMALL_PARTS_PER_SCENE[0], SMALL_PARTS_PER_SCENE[1]
-                    )
-                ),
-                SMALL_PARTS_PER_SCENE[2],
-                SMALL_PARTS_PER_SCENE[3],
-            ),
-            replace=True,
-        )
 
-        large_file_names = []
-        if random.random() < LARGE_PART_CHANCE:
-            large_file_names = np.random.choice(
-                large_step_files,
+def do_split(split_name):
+    global steps, meshes_cache, outlines_cache, r, peak_memory_usage, t_mesh_load_time, t_outline_load_time, t_render_time, last_memory_usage
+    with open(os.path.join(OUTPUT_DIR, split_name, METADATA_FILE), "w") as meta_file:
+        for i in range(int(SCENE_COUNT * SPLIT[split_name])):
+            file_names = np.random.choice(
+                steps,
                 np.clip(
                     round(
                         random.normalvariate(
-                            LARGE_PARTS_PER_SCENE[0], LARGE_PARTS_PER_SCENE[1]
+                            SMALL_PARTS_PER_SCENE[0], SMALL_PARTS_PER_SCENE[1]
                         )
                     ),
-                    LARGE_PARTS_PER_SCENE[2],
-                    LARGE_PARTS_PER_SCENE[3],
+                    SMALL_PARTS_PER_SCENE[2],
+                    SMALL_PARTS_PER_SCENE[3],
                 ),
                 replace=True,
             )
 
-        file_names = np.concatenate((file_names, large_file_names))
-        part_names = [os.path.splitext(f)[0] for f in file_names]
-        print(f"[{i+1}/{SCENE_COUNT}] Parts (n={len(file_names) - len(large_file_names)}S+{len(large_file_names)}L): {', '.join(part_names)}")
+            part_names = [os.path.splitext(f)[0] for f in file_names]
+            print(f"[{i+1}/{int(SCENE_COUNT * SPLIT[split_name])} {split_name}] Parts (n={len(file_names)}): {', '.join(part_names)}")
 
-        mesh_load_start = timeit.default_timer()
-        meshes = [
-            load_step_part(os.path.join(MODEL_DIR, f)) if f in large_file_names 
-            else meshes_cache.get(f, False) or meshes_cache.setdefault(f, load_step_part(os.path.join(MODEL_DIR, f)))
-            for f in file_names
-        ]
-        mesh_load_time = timeit.default_timer() - mesh_load_start
-        t_mesh_load_time += mesh_load_time
+            mesh_load_start = timeit.default_timer()
+            meshes = [
+                meshes_cache.get(f, False) or meshes_cache.setdefault(f, load_step_part(os.path.join(MODEL_DIR, f)))
+                for f in file_names
+            ]
+            mesh_load_time = timeit.default_timer() - mesh_load_start
+            t_mesh_load_time += mesh_load_time
 
-        outline_load_start = timeit.default_timer()
+            outline_load_start = timeit.default_timer()
 
-        def load_outline(f, mesh):
-            def compute_outline(mesh):
-                m = mesh.copy()
-                m.merge_vertices()
-                thresh = 10 if len(m.vertices) < 100000 else 30 if len(m.vertices) < 150000 else 90
-                return trimesh.load_path(m.vertices[m.face_adjacency_edges[m.face_adjacency_angles >= np.radians(thresh)]])
+            def load_outline(f, mesh):
+                def compute_outline(mesh):
+                    m = mesh.copy()
+                    m.merge_vertices()
+                    return trimesh.load_path(m.vertices[m.face_adjacency_edges[m.face_adjacency_angles >= np.radians(90)]])
+                
+                return outlines_cache.get(f, False) or outlines_cache.setdefault(f, compute_outline(mesh))
             
-            return compute_outline(mesh) if f in large_file_names else outlines_cache.get(f, False) or outlines_cache.setdefault(f, compute_outline(mesh))
-        
-        outlines = [load_outline(f, mesh) for f, mesh in zip(file_names, meshes)]
-        outline_load_time = timeit.default_timer() - outline_load_start
-        t_outline_load_time += outline_load_time
+            outlines = [load_outline(f, mesh) for f, mesh in zip(file_names, meshes)]
+            outline_load_time = timeit.default_timer() - outline_load_start
+            t_outline_load_time += outline_load_time
 
-        render_start = timeit.default_timer()
-        meshes_transformed, outlines_transformed, indexed_transforms = assemble(meshes, outlines)
+            render_start = timeit.default_timer()
+            meshes_transformed, outlines_transformed, indexed_transforms = assemble(meshes, outlines)
 
-        img = render(meshes_transformed, outlines_transformed, r, [0, 1, 0])
-        img_path = f"scene_{i:05d}.png"
-        Image.fromarray(img).save( os.path.join(IMG_PATH, img_path))
-        
-        named_transforms = [
-            {
-                "name": os.path.splitext(n)[0],
-                "translation": t["translation"],
-                "rotation": t["rotation"],
-            } for t, n in zip(indexed_transforms, file_names)
-        ]
-        
-        metadata = {
-            "image": os.path.join("images", img_path),
-            "label": json.dumps(convert_and_sort({"transforms": named_transforms}))
-        }
+            img = render(meshes_transformed, outlines_transformed, r, [0, 1, 0])
+            img_path = f"{i:05d}.png"
+            Image.fromarray(img).save(os.path.join(OUTPUT_DIR, split_name, img_path))
+            
+            named_transforms = [
+                {
+                    "name": os.path.splitext(n)[0],
+                    "translation": t["translation"],
+                    "rotation": t["rotation"],
+                } for t, n in zip(indexed_transforms, file_names)
+            ]
+            
+            metadata = {
+                "image": os.path.join("images", img_path),
+                "label": json.dumps(convert_and_sort({"transforms": named_transforms}))
+            }
 
-        meta_file.write(json.dumps(metadata) + "\n")
-        meta_file.flush() # write in real time
-        render_time = timeit.default_timer() - render_start
-        t_render_time += render_time
+            meta_file.write(json.dumps(metadata) + "\n")
+            meta_file.flush() # write in real time
+            render_time = timeit.default_timer() - render_start
+            t_render_time += render_time
 
-        memory_usage = process.memory_info().rss / (1024 * 1024)
-        print(f"Rendered all scenes in {(mesh_load_time + outline_load_time + render_time):.2f}s ({mesh_load_time:.2f} mesh / {outline_load_time:.2f} outline / {render_time:.2f} render). Current memory consumption {memory_usage:.2f} MiB ({((memory_usage - last_memory_usage) * 1024):.2f} KiB delta). Current cache size is {len(meshes_cache)}.")
-        last_memory_usage = memory_usage
-        peak_memory_usage = max(peak_memory_usage, memory_usage)
+            memory_usage = process.memory_info().rss / (1024 * 1024)
+            print(f"Rendered all scenes in {(mesh_load_time + outline_load_time + render_time):.2f}s ({mesh_load_time:.2f} mesh / {outline_load_time:.2f} outline / {render_time:.2f} render). Current memory consumption {memory_usage:.2f} MiB ({((memory_usage - last_memory_usage) * 1024):.2f} KiB delta). Current cache size is {len(meshes_cache)}.")
+            last_memory_usage = memory_usage
+            peak_memory_usage = max(peak_memory_usage, memory_usage)
 
-        del meshes_transformed, outlines_transformed
-        gc.collect()
+            del meshes_transformed, outlines_transformed
+            gc.collect()
+
+        meta_file.close()
+
+do_split("train")
+do_split("test")
 
 r.delete()
 print(f"Finished in {(t_mesh_load_time + t_outline_load_time + t_render_time):.2f}s ({t_mesh_load_time:.2f} mesh / {t_outline_load_time:.2f} outline / {t_render_time:.2f} render). Peak memory consumption {peak_memory_usage:.2f} MiB.")
