@@ -177,7 +177,7 @@ def main():
                 img_path = os.path.join(IMG_PATH, f"{fname}_{i}.png")
                 Image.fromarray(img).save(img_path)
 
-                json_line = {"image": f"images/{fname}_{i}.png", "label": fname}
+                json_line = {"file_name": f"images/{fname}_{i}.png", "label": fname}
                 fj.write(json.dumps(json_line) + "\n")
 
     r.delete()
