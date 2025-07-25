@@ -8,6 +8,7 @@ import random
 import trimesh
 import pyrender
 import warnings
+import argparse
 import numpy as np
 from PIL import Image
 from itertools import product
@@ -26,11 +27,15 @@ SPLIT = {
 IMG_SIZE = 280
 SMALL_PARTS_PER_SCENE = (3, 4, 1, 10)  # mu, sigma, min, max
 SCENE_COUNT = 200000
+FIXED_VIEW_DISTANCE = 500
 
 all_xyzms = [
     v for v in product((-1, 0, 1), repeat=3)
     if v != (0, 0, 0) and sum(x != 0 for x in v) in (1, 3)
 ]
+
+parser = argparse.ArgumentParser()
+parser.add_argument("-f", "--fixview", action="store_false", help="Whether or not to render parts at a fixed, rather than variable/dynamic, distance")
 
 
 def clear_output_dirs():
@@ -246,7 +251,7 @@ def render(m_transformed: list[trimesh.Trimesh], o_transformed, r: pyrender.Rend
     direction = xyzm
     direction = direction / np.linalg.norm(direction)
 
-    cam_dist = size * 0.7  # adjust zoom level
+    cam_dist = FIXED_VIEW_DISTANCE if parser.fixview else size * 0.7
     cam_position = direction * cam_dist
     cam_pose = look_at(cam_position)
 
