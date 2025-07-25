@@ -25,7 +25,7 @@ SPLIT = {
 
 IMG_SIZE = 280
 SMALL_PARTS_PER_SCENE = (3, 4, 1, 10)  # mu, sigma, min, max
-SCENE_COUNT = 100000
+SCENE_COUNT = 200000
 
 all_xyzms = [
     v for v in product((-1, 0, 1), repeat=3)
