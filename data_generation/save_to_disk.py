@@ -14,6 +14,6 @@ parser.add_argument(
 
 args = parser.parse_args()
 
-dataset = load_dataset("imagefolder", data_dir=f"dataset_s{args.stage}_sm_hf")
+dataset = load_dataset("imagefolder", data_dir=f"dataset_s{args.stage}_sm")
 
 dataset.save_to_disk(f"./dataset_s{args.stage}_sm_disk")
