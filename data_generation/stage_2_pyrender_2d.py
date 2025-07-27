@@ -16,7 +16,7 @@ from large_models import large_models as large_step_files
 from scipy.spatial.transform import Rotation as R
 
 MODEL_DIR = "models_sm/"
-OUTPUT_DIR = "dataset_s2_sm/"
+OUTPUT_DIR = "dataset_s2_sm_2d/"
 METADATA_FILE = "metadata.jsonl"
 
 SPLIT = {
@@ -24,9 +24,8 @@ SPLIT = {
     "test": 0.2
 }
 
-IMG_SIZE = 280
 SMALL_PARTS_PER_SCENE = (3, 4, 1, 10)  # mu, sigma, min, max
-SCENE_COUNT = 200000
+SCENE_COUNT = 50000
 FIXED_VIEW_DISTANCE = 500
 
 all_xyzms = [
@@ -36,6 +35,9 @@ all_xyzms = [
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-f", "--fixview", action="store_false", help="Whether or not to render parts at a fixed, rather than variable/dynamic, distance")
+parser.add_argument("-r", "--resolution", required=False, type=float, default=512, help="Resolution to render the images at")
+args = parser.parse_args()
+IMG_SIZE = args.resolution
 
 
 def clear_output_dirs():
@@ -251,7 +253,7 @@ def render(m_transformed: list[trimesh.Trimesh], o_transformed, r: pyrender.Rend
     direction = xyzm
     direction = direction / np.linalg.norm(direction)
 
-    cam_dist = FIXED_VIEW_DISTANCE if parser.fixview else size * 0.7
+    cam_dist = FIXED_VIEW_DISTANCE if args.fixview else size * 0.7
     cam_position = direction * cam_dist
     cam_pose = look_at(cam_position)
 
